@@ -1,14 +1,15 @@
 import pickle
+import os
 import sys
 from statistics import mode
 from time import sleep
 
 import cv2
 import numpy as np
-from PySide2 import QtCore
-from PySide2.QtCore import QThreadPool, QRunnable
-from PySide2.QtGui import QIcon
-from PySide2.QtWidgets import QApplication, QMainWindow, QMessageBox
+from PySide6 import QtCore
+from PySide6.QtCore import QThreadPool, QRunnable
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
 import CalibrationWithUncertainty
 import ContourUtils
@@ -20,9 +21,11 @@ from QT_GUI_Elements.qt_ui_classes import DartPositionLabel
 from QT_GUI_Elements.ui_dart_main_gui import Ui_DartScorer
 
 # #############  Config  ####################
-USE_CAMERA_CALIBRATION_TO_UNDISTORT = True
-loadSavedParameters = True
-CAMERA_NUMBER = 1  # 0,1 is built-in, 2 is external webcam
+# The bundled matrices belong to the original author's webcam, so do not use
+# them with a different camera. Enable this only after adding your own files.
+USE_CAMERA_CALIBRATION_TO_UNDISTORT = False
+loadSavedParameters = False
+CAMERA_NUMBER = int(os.environ.get("DARTS_CAMERA_INDEX", "1"))
 TRIANGLE_DETECT_THRESH = 11
 minArea = 800
 maxArea = 4000
@@ -53,10 +56,16 @@ x_offset_current, y_offset_current = 0, 0
 STOP_DETECTION = False
 dart_id = 0
 
-cap = cv2.VideoCapture(CAMERA_NUMBER)
-cap.set(cv2.CAP_PROP_FPS, 30)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+
+def open_camera(camera_number):
+    camera = cv2.VideoCapture(camera_number)
+    camera.set(cv2.CAP_PROP_FPS, 30)
+    camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+    return camera
+
+
+cap = None
 
 if USE_CAMERA_CALIBRATION_TO_UNDISTORT:
     if loadSavedParameters:
@@ -86,6 +95,10 @@ difference = np.zeros(target_ROI_size).astype(np.uint8)
 img_undist = np.zeros(target_ROI_size).astype(np.uint8)
 
 default_img = None
+
+
+class WorkerSignals(QtCore.QObject):
+    finished = QtCore.Signal()
 
 
 def detect_dart_circle_and_set_limits(img_roi):
@@ -156,48 +169,69 @@ class MainWindow(QMainWindow):
         self.ui.detection_sensitivity_slider.valueChanged.connect(lambda: UIFunctions.update_detection_sensitivity(self))
         self.ui.continue_button.clicked.connect(lambda: UIFunctions.start_detection_and_scoring(self))
         self.DartPositions = {}
+        self.detection_worker = None
+        self.default_image_worker = None
+        self.configure_01_game_options()
 
         self.show()
 
     def warning(self, message="Default"):
         QMessageBox.about(self, "Congratulations !", message)
 
+    def configure_01_game_options(self):
+        """Offer the common 01 games while allowing any positive score ending in 01."""
+        self.ui.initial_score_comboBox.setEditable(True)
+        for score in (701, 901, 1001):
+            if self.ui.initial_score_comboBox.findText(str(score)) == -1:
+                self.ui.initial_score_comboBox.addItem(str(score))
+        self.ui.initial_score_comboBox.lineEdit().editingFinished.connect(
+            lambda: UIFunctions.update_game_settings(self)
+        )
+
+    def closeEvent(self, event):
+        global STOP_DETECTION
+        STOP_DETECTION = True
+        if cap is not None and cap.isOpened():
+            cap.release()
+        cv2.destroyAllWindows()
+        event.accept()
+
 
 class DefaultImageSetter(QRunnable):
-    def closeEvent(self, event):
-        super(QRunnable, self).closeEvent(event)
-        self.ser.close()
-
     def __init__(self):
         super().__init__()
+        self.signals = WorkerSignals()
 
     def run(self):
         global default_img, markerCorners, markerIds
         found_markers = False
-        while True:
-            success, img = cap.read()
-            if success:
-                if USE_CAMERA_CALIBRATION_TO_UNDISTORT:
-                    img_undist = utils.undistortFunction(img, meanMTX, meanDIST)
-                else:
-                    img_undist = img
-                img_roi = ContourUtils.extract_roi_from_4_aruco_markers(img_undist, target_ROI_size, use_outer_corners=False, draw=True)
-                if img_roi is not None and img_roi.shape[1] > 0 and img_roi.shape[0] > 0:
-                    img_roi = cv2.resize(img_roi, resize_for_squish)
-                    default_img = img_roi
-                    print("Set default image")
-                    cv2.imshow("Default", default_img)
-                    cv2.waitKey(1)
-                    found_markers = True
-                if found_markers:
-                    cv2.putText(img_undist, "Found markers press/hold x to save", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                    if cv2.waitKey(1) & 0xff == ord('x'):
-                        cv2.destroyWindow("Preview")
-                        cv2.destroyWindow("Default")
-                        break
-                else:
-                    cv2.putText(img_undist, "No markers found", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                cv2.imshow("Preview", img_undist)
+        try:
+            while True:
+                success, img = cap.read()
+                if success:
+                    if USE_CAMERA_CALIBRATION_TO_UNDISTORT:
+                        img_undist = utils.undistortFunction(img, meanMTX, meanDIST)
+                    else:
+                        img_undist = img
+                    img_roi = ContourUtils.extract_roi_from_4_aruco_markers(img_undist, target_ROI_size, use_outer_corners=False, draw=True)
+                    if img_roi is not None and img_roi.shape[1] > 0 and img_roi.shape[0] > 0:
+                        img_roi = cv2.resize(img_roi, resize_for_squish)
+                        default_img = img_roi
+                        print("Set default image")
+                        cv2.imshow("Default", default_img)
+                        cv2.waitKey(1)
+                        found_markers = True
+                    if found_markers:
+                        cv2.putText(img_undist, "Found markers press/hold x to save", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                        if cv2.waitKey(1) & 0xff == ord('x'):
+                            cv2.destroyWindow("Preview")
+                            cv2.destroyWindow("Default")
+                            break
+                    else:
+                        cv2.putText(img_undist, "No markers found", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                    cv2.imshow("Preview", img_undist)
+        finally:
+            self.signals.finished.emit()
 
 
 def get_biggest_contour(contours):
@@ -216,10 +250,6 @@ def get_biggest_contour(contours):
 
 
 class DetectionAndScoring(QRunnable):
-    def closeEvent(self, event):
-        super(QRunnable, self).closeEvent(event)
-        self.ser.close()
-
     def __init__(self):
         global points, dart_tip, TRIANGLE_DETECT_THRESH, \
             score1, score2, scored_values, scored_mults, mults_of_round, values_of_round, img_undist, default_img, OPENCV_GUI_CREATED
@@ -229,134 +259,123 @@ class DetectionAndScoring(QRunnable):
             OPENCV_GUI_CREATED = True
         default_img = utils.reset_default_image(img_undist, target_ROI_size, resize_for_squish)
         cv2.destroyWindow("Object measurement")
+        self.signals = WorkerSignals()
 
     def run(self):
         global previous_img, difference, default_img, ACTIVE_PLAYER, UNDO_LAST_FLAG
         global points, dart_tip, TRIANGLE_DETECT_THRESH, score1, score2, scored_values, scored_mults, mults_of_round, values_of_round
         global new_dart_tip, update_dart_point, minArea, DARTBOARD_AREA
-        while True:
-            if STOP_DETECTION:
-                break
-            fpsReader = FPS()
-            success, img = cap.read()
-            if success:
-                if USE_CAMERA_CALIBRATION_TO_UNDISTORT:
-                    img_undist = utils.undistortFunction(img, meanMTX, meanDIST)
-                else:
-                    img_undist = img
-                img_roi = ContourUtils.extract_roi_from_4_aruco_markers(img_undist, target_ROI_size, use_outer_corners=False, hold_position=True)
-                if img_roi is not None and img_roi.shape[1] > 0 and img_roi.shape[0] > 0:
-                    img_roi = cv2.resize(img_roi, resize_for_squish)
-                    # resize img by a factor of 2
-                    img_show = cv2.resize(img_roi, dsize=(400, 400))
-                    cv2.imshow("Live", img_show)
+        try:
+            while True:
+                if STOP_DETECTION:
+                    break
+                fpsReader = FPS()
+                success, img = cap.read()
+                if success:
+                    if USE_CAMERA_CALIBRATION_TO_UNDISTORT:
+                        img_undist = utils.undistortFunction(img, meanMTX, meanDIST)
+                    else:
+                        img_undist = img
+                    img_roi = ContourUtils.extract_roi_from_4_aruco_markers(img_undist, target_ROI_size, use_outer_corners=False, hold_position=True)
+                    if img_roi is not None and img_roi.shape[1] > 0 and img_roi.shape[0] > 0:
+                        img_roi = cv2.resize(img_roi, resize_for_squish)
+                        img_show = cv2.resize(img_roi, dsize=(400, 400))
+                        cv2.imshow("Live", img_show)
 
-                    # cannyLow, cannyHigh, noGauss, minArea, erosions, dilations, epsilon, showFilters, automaticMode, threshold_new = gui.updateTrackBar()
+                        detect_dart_circle_and_set_limits(img_roi=img_roi)
+                        if center_ellipse == (0, 0):
+                            print("No dartboard detected!")
+                            continue
 
-                    ret = detect_dart_circle_and_set_limits(img_roi=img_roi)
-                    if center_ellipse == (0, 0):  # If dartboard was never detected raise exception
-                        print("No dartboard detected!")
-                        continue
+                        if default_img is None or np.all(default_img == 0):
+                            default_img = img_roi.copy()
 
-                    # get the difference image
-                    if default_img is None or np.all(default_img == 0):  # TODO: Bad fix but works
-                        default_img = img_roi.copy()
+                        difference = cv2.absdiff(img_roi, default_img)
+                        gray, thresh = self.prepare_differnce_image(TRIANGLE_DETECT_THRESH, difference)
 
-                    difference = cv2.absdiff(img_roi, default_img)
-                    # blur it for better edges
-                    gray, thresh = self.prepare_differnce_image(TRIANGLE_DETECT_THRESH, difference)
+                        minimal_darts_area = 0.005 * DARTBOARD_AREA
+                        maximal_darts_area = 0.1 * DARTBOARD_AREA
+                        contours, _ = cv2.findContours(gray, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-                    minimal_darts_area = 0.005 * DARTBOARD_AREA  # Darts are > 0.5% of the dartboard area
-                    maximal_darts_area = 0.1 * DARTBOARD_AREA  # Darts are < 10% of the dartboard area
-                    contours, _ = cv2.findContours(gray, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                        noise_contours = [i for i in contours if cv2.contourArea(i) < minimal_darts_area]
+                        darts_contours = [i for i in contours if minimal_darts_area < cv2.contourArea(i) < maximal_darts_area]
+                        if len(noise_contours) > 10 and len(darts_contours) == 0:
+                            print("Too much noise")
+                            default_img = utils.reset_default_image(img_undist, target_ROI_size, resize_for_squish)
+                            continue
+                        for contour in darts_contours:
+                            points_list = contour.reshape(contour.shape[0], contour.shape[2])
+                            triangle = cv2.minEnclosingTriangle(cv2.UMat(points_list.astype(np.float32)))
+                            triangle_np_array = cv2.UMat.get(triangle[1])
+                            if triangle_np_array is not None:
+                                pt1, pt2, pt3 = triangle_np_array.astype(np.int32)
+                            else:
+                                pt1, pt2, pt3 = np.array([-1, -1]), np.array([-1, -1]), np.array([-1, -1])
 
-                    noise_contours = [i for i in contours if cv2.contourArea(i) < minimal_darts_area]
-                    darts_contours = [i for i in contours if minimal_darts_area < cv2.contourArea(i) < maximal_darts_area]  # Filter out contours that are too small or too big
-                    if len(noise_contours) > 10 and len(darts_contours) == 0:
-                        print("Too much noise")
-                        default_img = utils.reset_default_image(img_undist, target_ROI_size, resize_for_squish)
-                        continue
-                    # contour = get_biggest_contour(contours)  # Get the biggest contour
-                    # if contour is None:
-                    #     continue  # If no contour was found continue with next frame
-                    for contour in darts_contours:
-                        points_list = contour.reshape(contour.shape[0], contour.shape[2])
-                        triangle = cv2.minEnclosingTriangle(cv2.UMat(points_list.astype(np.float32)))
-                        triangle_np_array = cv2.UMat.get(triangle[1])
-                        if triangle_np_array is not None:
-                            pt1, pt2, pt3 = triangle_np_array.astype(np.int32)
-                        else:
-                            pt1, pt2, pt3 = np.array([-1, -1]), np.array([-1, -1]), np.array([-1, -1])
+                            dart_tip, rest_pts = dart_scorer_util.find_tip_of_dart(pt1, pt2, pt3)
+                            cv2.circle(img_roi, dart_tip, 4, (0, 0, 255), -1)
+                            self.draw_detected_darts(dart_tip, pt1, pt2, pt3, thresh)
 
-                        dart_tip, rest_pts = dart_scorer_util.find_tip_of_dart(pt1, pt2, pt3)
-                        # Display the Dart point
-                        cv2.circle(img_roi, dart_tip, 4, (0, 0, 255), -1)
+                            bottom_point = dart_scorer_util.get_bottom_point(rest_pts[0], rest_pts[1])
+                            cv2.line(img_roi, dart_tip, bottom_point, (0, 0, 255), 2)
+                            cv2.line(thresh, dart_tip, bottom_point, (255, 0, 255), 2)
 
-                        self.draw_detected_darts(dart_tip, pt1, pt2, pt3, thresh)
+                            k = -0.215
+                            vect = dart_tip - bottom_point
+                            new_dart_tip = dart_tip + k * vect
 
+                            cv2.circle(img_roi, new_dart_tip.astype(np.int32), 4, (0, 255, 0), -1)
+                            new_radius, new_angle = dart_scorer_util.get_radius_and_angle(center_ellipse[0], center_ellipse[1], new_dart_tip[0], new_dart_tip[1])
+                            new_val, new_mult = dart_scorer_util.evaluate_throw(new_radius, new_angle)
 
-                        bottom_point = dart_scorer_util.get_bottom_point(rest_pts[0], rest_pts[1])
-                        cv2.line(img_roi, dart_tip, bottom_point, (0, 0, 255), 2)
-                        cv2.line(thresh, dart_tip, bottom_point, (255, 0, 255), 2)
+                            if len(scored_values) <= 20:
+                                scored_values.append(new_val)
+                                scored_mults.append(new_mult)
+                            else:
+                                update_dart_point = True
+                                final_val = mode(scored_values)
+                                final_mult = mode(scored_mults)
+                                values_of_round.append(final_val)
+                                mults_of_round.append(final_mult)
+                                default_img = utils.reset_default_image(img_undist, target_ROI_size, resize_for_squish)
+                                if len(values_of_round) == 3:
+                                    self.reset_default_image_after_player()
+                                    self.enter_score_of_one_player(score1, score2)
+                                scored_values = []
+                                scored_mults = []
 
-                        k = -0.215  # scaling factor for position adjustment of dart tip
-                        vect = (dart_tip - bottom_point)
-                        new_dart_tip = dart_tip + k * vect
+                        cv2.imshow("Threshold", thresh)
+                        previous_img = img_roi
+                        cv2.circle(img_roi, center_ellipse, int(a * (radius_1 / 100)), (255, 0, 255), 1)
+                        cv2.circle(img_roi, center_ellipse, int(a * (radius_2 / 100)), (255, 0, 255), 1)
+                        cv2.circle(img_roi, center_ellipse, int(a * (radius_3 / 100)), (255, 0, 255), 1)
+                        cv2.circle(img_roi, center_ellipse, int(a * (radius_4 / 100)), (255, 0, 255), 1)
+                        cv2.circle(img_roi, center_ellipse, int(a * (radius_5 / 100)), (255, 0, 255), 1)
+                        cv2.circle(img_roi, center_ellipse, int(a * (radius_6 / 100)), (255, 0, 255), 1)
+                        cv2.ellipse(img_roi, ellipse, (0, 255, 0), 2)
 
-                        cv2.circle(img_roi, new_dart_tip.astype(np.int32), 4, (0, 255, 0), -1)
-                        new_radius, new_angle = dart_scorer_util.get_radius_and_angle(center_ellipse[0], center_ellipse[1], new_dart_tip[0], new_dart_tip[1])
-                        new_val, new_mult = dart_scorer_util.evaluate_throw(new_radius, new_angle)
+                        fps, img_roi = fpsReader.update(img_roi)
+                        cv2.imshow("Dart Settings", utils.rez(img_roi, 1.5))
+                    else:
+                        print("NO MARKERS FOUND!")
+                        cv2.putText(img_undist, "NO MARKERS FOUND", (300, 300), cv2.FONT_HERSHEY_COMPLEX, 3, (255, 0, 255), 3)
+                        cv2.imshow("Dart Settings", img_undist)
+                        sleep(0.1)
 
-                        if len(scored_values) <= 20:
-                            scored_values.append(new_val)
-                            scored_mults.append(new_mult)
-                        else:
-                            update_dart_point = True
-                            final_val = mode(scored_values)  # Take the most frequent result and use that as the final result
-                            final_mult = mode(scored_mults)
-                            values_of_round.append(final_val)
-                            mults_of_round.append(final_mult)
-                            default_img = utils.reset_default_image(img_undist, target_ROI_size, resize_for_squish)  # Reset the default image after every dart
-                            if len(values_of_round) == 3:
-                                self.reset_default_image_after_player()
-                                self.enter_score_of_one_player(score1, score2)
-                            scored_values = []
-                            scored_mults = []
-
-                    cv2.imshow("Threshold", thresh)
-
-                    previous_img = img_roi
-                    # TODO: Separate show image and processing image with cv2.copy
-                    # cv2.ellipse(img_roi, (int(x), int(y)), (int(a), int(b)), int(angle), 0.0, 360.0, (255, 0, 0))
-                    cv2.circle(img_roi, center_ellipse, int(a * (radius_1 / 100)), (255, 0, 255), 1)
-                    cv2.circle(img_roi, center_ellipse, int(a * (radius_2 / 100)), (255, 0, 255), 1)
-                    cv2.circle(img_roi, center_ellipse, int(a * (radius_3 / 100)), (255, 0, 255), 1)
-                    cv2.circle(img_roi, center_ellipse, int(a * (radius_4 / 100)), (255, 0, 255), 1)
-                    cv2.circle(img_roi, center_ellipse, int(a * (radius_5 / 100)), (255, 0, 255), 1)
-                    cv2.circle(img_roi, center_ellipse, int(a * (radius_6 / 100)), (255, 0, 255), 1)
-                    cv2.ellipse(img_roi, ellipse, (0, 255, 0), 2)
-
-                    fps, img_roi = fpsReader.update(img_roi)
-                    cv2.imshow("Dart Settings", utils.rez(img_roi, 1.5))
-                else:
-                    print("NO MARKERS FOUND!")
-                    cv2.putText(img_undist, "NO MARKERS FOUND", (300, 300), cv2.FONT_HERSHEY_COMPLEX, 3, (255, 0, 255), 3)
-                    cv2.imshow("Dart Settings", img_undist)
-                    sleep(0.1)
-
-                cv2.waitKey(1)
-                if cv2.waitKey(1) & 0xff == ord('q'):
-                    cap.release()
-                    exit()
-            # UIFunctions.update_labels(window)
+                    cv2.waitKey(1)
+                    if cv2.waitKey(1) & 0xff == ord('q'):
+                        break
+                # UIFunctions.update_labels(window)
+        finally:
+            self.signals.finished.emit()
 
     def reset_default_image_after_player(self):
         """
         Resets the default image after a player has thrown 3 darts and triggers the corresponding gui functions
         :return:
         """
-        global default_img
-        UIFunctions.stop_detection_and_scoring(window)
+        global default_img, STOP_DETECTION
+        STOP_DETECTION = True
         success, img = cap.read()  # Reset the default image after every dart
         if success:
             if USE_CAMERA_CALIBRATION_TO_UNDISTORT:
@@ -372,23 +391,15 @@ class DetectionAndScoring(QRunnable):
         :param score2:
         :return:
         """
-        global UNDO_LAST_FLAG, default_img, ACTIVE_PLAYER, values_of_round, mults_of_round
-        UNDO_LAST_FLAG = False
-        # if cv2.waitKey(0) & 0xFF == ord('\r'):
-        # if window.ui.continue_button.isChecked():
-        if not UNDO_LAST_FLAG:
-            if not STOP_DETECTION:
-                window.ui.press_enter_label.setText("")
-            if ACTIVE_PLAYER == 1:
-                dart_scorer_util.update_score(score1, values_of_round=values_of_round, mults_of_round=mults_of_round)
-                ACTIVE_PLAYER = 2
-            elif ACTIVE_PLAYER == 2:
-                dart_scorer_util.update_score(score2, values_of_round=values_of_round, mults_of_round=mults_of_round)
-                ACTIVE_PLAYER = 1
-            values_of_round = []
-            mults_of_round = []
-        else:
-            UNDO_LAST_FLAG = False
+        global default_img, ACTIVE_PLAYER, values_of_round, mults_of_round
+        if ACTIVE_PLAYER == 1:
+            dart_scorer_util.update_score(score1, values_of_round=values_of_round, mults_of_round=mults_of_round)
+            ACTIVE_PLAYER = 2
+        elif ACTIVE_PLAYER == 2:
+            dart_scorer_util.update_score(score2, values_of_round=values_of_round, mults_of_round=mults_of_round)
+            ACTIVE_PLAYER = 1
+        values_of_round = []
+        mults_of_round = []
 
     def draw_detected_darts(self, dart_point, pt1, pt2, pt3, thresh):
         """
@@ -431,30 +442,21 @@ class UIFunctions(QMainWindow):
         self.ui.current_detection_sensitivity_lable.setText(f"{TRIANGLE_DETECT_THRESH}")
 
     def undo_last_throw(self):
-        global values_of_round, mults_of_round, UNDO_LAST_FLAG
-        UNDO_LAST_FLAG = True
+        global values_of_round, mults_of_round
         self.ui.press_enter_label.setText("    Please throw again")
-        if len(values_of_round) > 0:
-            val = values_of_round.pop()
-            mult = mults_of_round.pop()
+        removed_throw = DartScore.undo_last_throw(values_of_round, mults_of_round)
+        if removed_throw is not None:
+            val, mult = removed_throw
             if ACTIVE_PLAYER == 1:
                 self.ui.player1_sum_round.setText(str(int(self.ui.player1_sum_round.text()) - val * mult))
-                if values_of_round == 1:
-                    self.ui.player1_1_label.setText("")
-                elif values_of_round == 2:
-                    self.ui.player1_2_label.setText("")
-                elif values_of_round == 3:
-                    self.ui.player1_3_label.setText("")
+                player_labels = (self.ui.player1_1, self.ui.player1_2, self.ui.player1_3)
             elif ACTIVE_PLAYER == 2:
                 self.ui.player2_sum_round.setText(str(int(self.ui.player2_sum_round.text()) - val * mult))
-                if values_of_round == 1:
-                    self.ui.player2_1_label.setText("")
-                elif values_of_round == 2:
-                    self.ui.player2_2_label.setText("")
-                elif values_of_round == 3:
-                    self.ui.player2_3_label.setText("")
-
-            list(self.DartPositions.values())[-1].setText("")
+                player_labels = (self.ui.player2_1, self.ui.player2_2, self.ui.player2_3)
+            player_labels[len(values_of_round)].setText("")
+            if self.DartPositions:
+                _, dart_position = self.DartPositions.popitem()
+                dart_position.deleteLater()
 
     def delete_all_x_on_board(self):
         print("LEN:", len(self.DartPositions.values()))
@@ -472,12 +474,25 @@ class UIFunctions(QMainWindow):
                                                            int(pos_y * Scaling_factor_for_x_placing_in_gui[1]))
 
     def set_default_image(self):
+        if self.default_image_worker is not None or self.detection_worker is not None:
+            return
         pool = QThreadPool.globalInstance()
         default_img_setter = DefaultImageSetter()
+        default_img_setter.signals.finished.connect(
+            lambda: UIFunctions.default_image_capture_finished(self)
+        )
+        self.default_image_worker = default_img_setter
+        self.ui.set_default_img_button.setEnabled(False)
+        self.ui.start_measuring_button.setEnabled(False)
         pool.start(default_img_setter)
 
     def start_detection_and_scoring(self):
         global STOP_DETECTION, default_img, img_undist
+        if self.detection_worker is not None or self.default_image_worker is not None:
+            return
+        if cap is None or not cap.isOpened():
+            QMessageBox.warning(self, "Camera unavailable", "The selected camera could not be opened.")
+            return
         STOP_DETECTION = False
         # change color of stop_measuring_button to transparent
         self.ui.stop_measuring_button.setStyleSheet("background-color: transparent")
@@ -487,7 +502,13 @@ class UIFunctions(QMainWindow):
         pool = QThreadPool.globalInstance()
         default_img = utils.reset_default_image(img_undist, target_ROI_size, resize_for_squish)
         detection_and_scoring = DetectionAndScoring()
+        detection_and_scoring.signals.finished.connect(
+            lambda: UIFunctions.detection_finished(self)
+        )
+        self.detection_worker = detection_and_scoring
         UIFunctions.delete_all_x_on_board(window)  ################################
+        self.ui.start_measuring_button.setEnabled(False)
+        self.ui.set_default_img_button.setEnabled(False)
         pool.start(detection_and_scoring)
 
     def stop_detection_and_scoring(self):
@@ -498,10 +519,34 @@ class UIFunctions(QMainWindow):
         window.ui.press_enter_label.setText("    1. Remove all Darts\n    2. Press Continue to start next round")
         STOP_DETECTION = True
 
+    def default_image_capture_finished(self):
+        self.default_image_worker = None
+        self.ui.set_default_img_button.setEnabled(True)
+        self.ui.start_measuring_button.setEnabled(True)
+
+    def detection_finished(self):
+        self.detection_worker = None
+        self.ui.stop_measuring_button.setStyleSheet("background-color: red")
+        self.ui.start_measuring_button.setStyleSheet("background-color: transparent")
+        self.ui.press_enter_label.setText("    1. Remove all Darts\n    2. Press Continue to start next round")
+        self.ui.start_measuring_button.setEnabled(True)
+        self.ui.set_default_img_button.setEnabled(True)
+
     def update_game_settings(self):
-        score = int(self.ui.initial_score_comboBox.currentText())
+        global ACTIVE_PLAYER, values_of_round, mults_of_round
+        try:
+            score = int(self.ui.initial_score_comboBox.currentText())
+        except ValueError:
+            return
+        if score < 101 or score % 100 != 1:
+            QMessageBox.warning(self, "Invalid 01 score", "Enter a positive score ending in 01, such as 501 or 1001.")
+            return
         score1.setNominalScore(score)
         score2.setNominalScore(score)
+        ACTIVE_PLAYER = 1
+        values_of_round = []
+        mults_of_round = []
+        UIFunctions.delete_all_x_on_board(self)
 
     def update_labels(self):
         global values_of_round, mults_of_round, ACTIVE_PLAYER, new_dart_tip, update_dart_point
@@ -532,7 +577,7 @@ class UIFunctions(QMainWindow):
                 self.ui.player1_1.setText("-")
                 self.ui.player1_2.setText("-")
                 self.ui.player1_3.setText("-")
-                self.ui.player2_sum_round.setText("")
+                self.ui.player1_sum_round.setText("")
         elif ACTIVE_PLAYER == 2:
             self.ui.player_frame_2.setStyleSheet("background-color: #3a3a3a;")
             self.ui.player_frame.setStyleSheet("background-color: rgb(35, 35, 35);")
@@ -566,10 +611,11 @@ class UIFunctions(QMainWindow):
 
 
 if __name__ == "__main__":
+    cap = open_camera(CAMERA_NUMBER)
     app = QApplication(sys.argv)
     window = MainWindow()
     label_update_timer = QtCore.QTimer()
     label_update_timer.timeout.connect(lambda: UIFunctions.update_labels(window))
     label_update_timer.start(10)  # every 10 milliseconds
 
-    sys.exit(app.exec_())
+    sys.exit(app.exec())

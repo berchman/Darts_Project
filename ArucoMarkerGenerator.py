@@ -1,10 +1,8 @@
 import cv2
-import cv2.aruco as aruco
-
-aruco_dict = aruco.Dictionary_get(aruco.DICT_6X6_250)
+import aruco_compat
 
 for id in range(4):
-    img = aruco.drawMarker(aruco_dict, id=id, sidePixels=140)
+    img = aruco_compat.generate_marker(id, side_pixels=140)
     cv2.imshow("Aruco", img)
     cv2.imwrite(f"ArucoID{id}.png", img)
     cv2.waitKey(100)
