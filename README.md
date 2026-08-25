@@ -68,22 +68,50 @@ We solved this by 3D printed mounts for the board:
 ![](Resources/Doku/dartboard_holder.png)
 
 ### Software
-Just clone the repository and run the following command:
+This project has been updated for an Apple-silicon-friendly Python 3.11
+environment. From the repository root, create the environment once and install
+the dependencies:
 
 ```bash
-pip install -r requirements.txt
+python3.11 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -r requirements.txt
 ```
 
-First you need to calibrate the camera. This can be done with the [Calibration Script](CalibrationWithUncertainty.py).
-Then you can start [main_with_gui.py](main_with_gui.py).
+Start the app with:
+
+```bash
+.venv/bin/python main_with_gui.py
+```
+
+The app starts without camera undistortion because the bundled calibration
+files belong to the original author's camera. Use your own calibration before
+enabling distortion correction. If the Logitech camera is not selected, try a
+different index without editing code, for example:
+
+```bash
+DARTS_CAMERA_INDEX=0 .venv/bin/python main_with_gui.py
+```
+
+You can calibrate the camera with the [Calibration Script](CalibrationWithUncertainty.py).
 The GUI looks like this:
 
 ![](Resources/Doku/GUI.png)
 
 ## Short Instructions
-- First select your starting Points (501, 301 or 101) for your dart game.
+- First select or enter an 01 starting score (for example 501, 701, 901, or 1001).
 - Then set the default image with the button "Set Default".
 - After that you can start the detection with "Start"
 - If the darts are detected badly you can adjust the threshold with the slider.
 
+### Supported games
 
+The current GUI supports two-player 01 games with double-out scoring. Cricket
+is not implemented yet, so it needs its own game-state and scorecard pass
+rather than sharing this 01 counter.
+
+Run the hardware-free scoring checks with:
+
+```bash
+python3 -m unittest discover -s Tests -p 'test_*.py' -v
+```

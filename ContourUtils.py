@@ -2,6 +2,7 @@ import math
 
 import cv2
 import numpy as np
+import aruco_compat
 
 MARKER_CORNERS_SAVE, MARKER_IDS_SAVE = None, None
 
@@ -112,9 +113,8 @@ def extract_roi_from_4_aruco_markers(frame, dsize=(500, 500), draw=False, use_ou
     :return: the ROI
     """
     global MARKER_IDS_SAVE, MARKER_CORNERS_SAVE
-    dictionary = cv2.aruco.Dictionary_get(cv2.aruco.DICT_6X6_250)
-    # Initialize the detector parameters using default values
-    parameters = cv2.aruco.DetectorParameters_create()
+    marker_dictionary = aruco_compat.dictionary()
+    parameters = aruco_compat.detector_parameters()
 
     inner_corners = [2, 3, 0, 1]
     if use_outer_corners:
@@ -122,7 +122,9 @@ def extract_roi_from_4_aruco_markers(frame, dsize=(500, 500), draw=False, use_ou
 
     # Detect the markers in the image
     if not hold_position:
-        markerCorners, markerIds, rejectedCandidates = cv2.aruco.detectMarkers(frame, dictionary, parameters=parameters)
+        markerCorners, markerIds, rejectedCandidates = aruco_compat.detect_markers(
+            frame, marker_dictionary, parameters
+        )
         if draw:
             frame = cv2.aruco.drawDetectedMarkers(frame, markerCorners, markerIds)
     else:

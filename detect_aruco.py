@@ -1,17 +1,18 @@
 import cv2
+import aruco_compat
 
 
-dictionary = cv2.aruco.Dictionary_get(cv2.aruco.DICT_6X6_250)
-
-# Initialize the detector parameters using default values
-parameters = cv2.aruco.DetectorParameters_create()
+marker_dictionary = aruco_compat.dictionary()
+parameters = aruco_compat.detector_parameters()
 
 cap = cv2.VideoCapture(1)
 
 
 while True:
     success, img = cap.read()
-    markerCorners, markerIds, rejectedCandidates = cv2.aruco.detectMarkers(img, dictionary, parameters=parameters)
+    markerCorners, markerIds, rejectedCandidates = aruco_compat.detect_markers(
+        img, marker_dictionary, parameters
+    )
     img = cv2.aruco.drawDetectedMarkers(img, markerCorners, markerIds)
     print(markerIds)
     cv2.imshow("Image", img)
